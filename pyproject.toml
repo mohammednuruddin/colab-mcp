@@ -23,4 +23,8 @@ build-backend = "hatchling.build"
 dev = [
     "fastmcp>=2.2.0",
     "pytest>=8.4.2",
+    "ruff>=0.14.3",
+]
+commit = [
+    "pre-commit>=4.3.0",
 ]
