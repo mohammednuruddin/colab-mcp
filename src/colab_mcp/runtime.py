@@ -4,9 +4,9 @@ from fastmcp import FastMCP
 mcp = FastMCP("runtime")
 
 
-# Add an eval tool
+# Add an execute code tool
 @mcp.tool()
-def eval(code: str):
+def execute_code(code: str):
     """(Eventually) Evaluates code in a Colab kernel."""
     # But for now, just evals here.
     return eval(code)
