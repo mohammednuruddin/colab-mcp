@@ -1,7 +1,7 @@
 import json
 import logging
 from enum import Enum
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -14,6 +14,27 @@ COLAB_CLIENT_AGENT_HEADER = {
     "key": "X-Goog-Colab-Client-Agent",
     "value": "python-colab-client",
 }
+
+
+class Accelerator(str, Enum):
+    NONE = "ACCELERATOR_NONE"
+    T4 = "T4"
+    L4 = "L4"
+    A100 = "A100"
+    V28 = "V2-8"
+    V5E1 = "V5E-1"
+    V6E1 = "V6E-1"
+
+
+class Variant(str, Enum):
+    DEFAULT = "VARIANT_DEFAULT"
+    GPU = "VARIANT_GPU"
+    TPU = "VARIANT_TPU"
+
+
+class Shape(str, Enum):
+    STANDARD = "SHAPE_STANDARD"
+    HIGH_RAM = "SHAPE_HIGH_RAM"
 
 
 class SubscriptionTier(str, Enum):
@@ -44,6 +65,17 @@ TUN_ENDPOINT = "/tun/m"
 
 class InvalidSchemaError(Exception):
     """Raised if the given schema for the request is invalid/missing."""
+
+
+class ListedAssignment(BaseModel):
+    accelerator: Accelerator
+    endpoint: str
+    variant: Variant
+    machine_shape: Shape = Field(..., alias="machineShape")
+
+
+class ListedAssignments(BaseModel):
+    assignments: List[ListedAssignment]
 
 
 class ColabRequestError(Exception):
@@ -134,3 +166,8 @@ class ColabClient:
     def get_ccu_info(self) -> CcuInfo:
         url = urljoin(self.colab_domain, f"{TUN_ENDPOINT}/ccu-info")
         return self._issue_request(url, schema=CcuInfo)
+
+    def list_assignments(self) -> List[ListedAssignment]:
+        url = urljoin(self.colab_domain, f"{TUN_ENDPOINT}/assignments")
+        assignments = self._issue_request(url, schema=ListedAssignments)
+        return assignments.assignments

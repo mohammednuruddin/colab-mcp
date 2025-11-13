@@ -3,11 +3,47 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 
-from colab_mcp.client import CcuInfo, ColabClient, SubscriptionTier
+from colab_mcp.client import (
+    Accelerator,
+    CcuInfo,
+    ColabClient,
+    ListedAssignments,
+    Shape,
+    SubscriptionState,
+    SubscriptionTier,
+    Variant,
+)
 
 COLAB_HOST = "https://colab.example.com"
 GOOGLE_APIS_HOST = "https://colab.example.googleapis.com"
 BEARER_TOKEN = "access-token"
+
+DEFAULT_ASSIGNMENT_RESPONSE = {
+    "accelerator": Accelerator.A100,
+    "endpoint": "mock-server",
+    "fit": 30,
+    "sub": SubscriptionState.UNSUBSCRIBED,
+    "subTier": SubscriptionTier.NONE,
+    "variant": Variant.GPU,
+    "machineShape": Shape.STANDARD,
+    "runtimeProxyInfo": {
+        "token": "mock-token",
+        "tokenExpiresInSeconds": 42,
+        "url": "https://mock-url.com",
+    },
+}
+
+
+DEFAULT_LIST_ASSIGNMENTS_RESPONSE = ListedAssignments(
+    assignments=[
+        {
+            "accelerator": DEFAULT_ASSIGNMENT_RESPONSE["accelerator"],
+            "endpoint": DEFAULT_ASSIGNMENT_RESPONSE["endpoint"],
+            "variant": DEFAULT_ASSIGNMENT_RESPONSE["variant"],
+            "machineShape": DEFAULT_ASSIGNMENT_RESPONSE["machineShape"],
+        }
+    ]
+)
 
 
 def with_xssi(response):
@@ -49,6 +85,17 @@ class TestColabClient(unittest.TestCase):
 
         ccu_info = self.client.get_ccu_info()
         self.assertEqual(ccu_info, CcuInfo(**mock_response))
+        mock_request.assert_called_once()
+
+    @patch("requests.Session.request")
+    def test_list_assignments(self, mock_request):
+        mock_request.return_value.ok = True
+        mock_request.return_value.text = with_xssi(
+            DEFAULT_LIST_ASSIGNMENTS_RESPONSE.model_dump_json(by_alias=True)
+        )
+
+        assignments = self.client.list_assignments()
+        self.assertEqual(assignments, DEFAULT_LIST_ASSIGNMENTS_RESPONSE.assignments)
         mock_request.assert_called_once()
 
 
