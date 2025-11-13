@@ -1,8 +1,10 @@
+import base64
+from enum import Enum
+from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urljoin, urlparse
 import json
 import logging
-from enum import Enum
-from typing import Dict, List, Optional
-from urllib.parse import urljoin, urlparse
+import uuid
 
 import requests
 from pydantic import BaseModel, Field, TypeAdapter
@@ -14,6 +16,11 @@ COLAB_CLIENT_AGENT_HEADER = {
     "key": "X-Goog-Colab-Client-Agent",
     "value": "python-colab-client",
 }
+COLAB_XSRF_TOKEN_HEADER = {"key": "X-Goog-Colab-Token", "value": ""}
+
+
+def uuid_to_web_safe_base64(notebook_hash: uuid.UUID) -> str:
+    return base64.urlsafe_b64encode(notebook_hash.bytes).rstrip(b"=").decode("utf-8")
 
 
 class Accelerator(str, Enum):
@@ -24,6 +31,24 @@ class Accelerator(str, Enum):
     V28 = "V2-8"
     V5E1 = "V5E-1"
     V6E1 = "V6E-1"
+
+
+class GetAssignmentResponse(BaseModel):
+    xsrf_token: str = Field(..., alias="xsrfToken")
+
+
+class Outcome(str, Enum):
+    SUCCESS = "SUCCESS"
+    DENYLISTED = "DENYLISTED"
+    QUOTA_DENIED_REQUESTED_VARIANTS = "QUOTA_DENIED_REQUESTED_VARIANTS"
+    QUOTA_EXCEEDED_USAGE_TIME = "QUOTA_EXCEEDED_USAGE_TIME"
+    UNDEFINED_OUTCOME = "UNDEFINED_OUTCOME"
+
+
+class RuntimeProxyInfo(BaseModel):
+    token: str
+    token_expires_in_seconds: int = Field(..., alias="tokenExpiresInSeconds")
+    url: str
 
 
 class Variant(str, Enum):
@@ -59,6 +84,21 @@ class UserInfo(BaseModel):
     subscription_tier: SubscriptionTier = Field(..., alias="subscriptionTier")
 
 
+class Assignment(BaseModel):
+    accelerator: Accelerator
+    endpoint: str
+    idle_timeout_sec: int = Field(..., alias="idleTimeoutSec")
+    machine_shape: Shape = Field(..., alias="machineShape")
+    runtime_proxy_info: RuntimeProxyInfo = Field(..., alias="runtimeProxyInfo")
+    subscription_state: SubscriptionState = Field(..., alias="subscriptionState")
+    subscription_tier: SubscriptionTier = Field(..., alias="subscriptionTier")
+    variant: Variant
+
+
+class PostAssignmentResponse(Assignment):
+    outcome: Optional[Outcome] = None
+
+
 XSSI_PREFIX = ")]}'\n"
 TUN_ENDPOINT = "/tun/m"
 
@@ -84,6 +124,18 @@ class ColabRequestError(Exception):
         self.request = request
         self.response = response
         self.response_body = response_body
+
+
+class TooManyAssignmentsError(Exception):
+    pass
+
+
+class DenylistedError(Exception):
+    pass
+
+
+class InsufficientQuotaError(Exception):
+    pass
 
 
 class ColabClient:
@@ -171,3 +223,80 @@ class ColabClient:
         url = urljoin(self.colab_domain, f"{TUN_ENDPOINT}/assignments")
         assignments = self._issue_request(url, schema=ListedAssignments)
         return assignments.assignments
+
+    def assign(
+        self,
+        notebook_hash: uuid.UUID,
+        variant: Variant,
+        accelerator: Optional[Accelerator] = None,
+    ) -> Dict[str, Any]:
+        assignment = self._get_assignment(notebook_hash, variant, accelerator)
+        if isinstance(assignment, Assignment):
+            return {"assignment": assignment, "is_new": False}
+
+        try:
+            res = self._post_assignment(
+                notebook_hash, assignment.xsrf_token, variant, accelerator
+            )
+        except ColabRequestError as e:
+            if e.response.status_code == 412:
+                raise TooManyAssignmentsError(str(e))
+            raise e
+
+        if res.outcome in [
+            Outcome.QUOTA_DENIED_REQUESTED_VARIANTS,
+            Outcome.QUOTA_EXCEEDED_USAGE_TIME,
+        ]:
+            raise InsufficientQuotaError(
+                "You have insufficient quota to assign this server."
+            )
+        if res.outcome == Outcome.DENYLISTED:
+            raise DenylistedError(
+                "This account has been blocked from accessing Colab servers."
+            )
+
+        return {"assignment": res, "is_new": True}
+
+    def _build_assign_url(
+        self,
+        notebook_hash: uuid.UUID,
+        variant: Variant,
+        accelerator: Optional[Accelerator] = None,
+    ) -> str:
+        url = urljoin(self.colab_domain, f"{TUN_ENDPOINT}/assign")
+        params = {"nbh": uuid_to_web_safe_base64(notebook_hash)}
+        if variant != Variant.DEFAULT:
+            params["variant"] = variant.value
+        if accelerator:
+            params["accelerator"] = accelerator.value
+
+        req = requests.Request("GET", url, params=params)
+        prep = self.session.prepare_request(req)
+        return prep.url
+
+    def _get_assignment(
+        self,
+        notebook_hash: uuid.UUID,
+        variant: Variant,
+        accelerator: Optional[Accelerator] = None,
+    ) -> Union[GetAssignmentResponse, Assignment]:
+        url = self._build_assign_url(notebook_hash, variant, accelerator)
+
+        # A bit of a hack to handle union types with pydantic
+        try:
+            return self._issue_request(url, schema=Assignment)
+        except Exception:
+            return self._issue_request(url, schema=GetAssignmentResponse)
+
+    def _post_assignment(
+        self,
+        notebook_hash: uuid.UUID,
+        xsrf_token: str,
+        variant: Variant,
+        accelerator: Optional[Accelerator] = None,
+    ) -> PostAssignmentResponse:
+        url = self._build_assign_url(notebook_hash, variant, accelerator)
+        headers = {COLAB_XSRF_TOKEN_HEADER["key"]: xsrf_token}
+        return self._issue_request(
+            url, method="POST", headers=headers, schema=PostAssignmentResponse
+        )
