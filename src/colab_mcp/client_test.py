@@ -1,6 +1,7 @@
 import json
 import unittest
 from unittest.mock import MagicMock, patch
+import uuid
 
 
 from colab_mcp.client import (
@@ -8,6 +9,8 @@ from colab_mcp.client import (
     CcuInfo,
     ColabClient,
     ListedAssignments,
+    Outcome,
+    PostAssignmentResponse,
     Shape,
     SubscriptionState,
     SubscriptionTier,
@@ -17,6 +20,7 @@ from colab_mcp.client import (
 COLAB_HOST = "https://colab.example.com"
 GOOGLE_APIS_HOST = "https://colab.example.googleapis.com"
 BEARER_TOKEN = "access-token"
+NOTEBOOK_HASH = uuid.uuid4()
 
 DEFAULT_ASSIGNMENT_RESPONSE = {
     "accelerator": Accelerator.A100,
@@ -43,6 +47,19 @@ DEFAULT_LIST_ASSIGNMENTS_RESPONSE = ListedAssignments(
             "machineShape": DEFAULT_ASSIGNMENT_RESPONSE["machineShape"],
         }
     ]
+)
+
+
+DEFAULT_ASSIGNMENT = PostAssignmentResponse(
+    accelerator=DEFAULT_ASSIGNMENT_RESPONSE["accelerator"],
+    endpoint=DEFAULT_ASSIGNMENT_RESPONSE["endpoint"],
+    idleTimeoutSec=DEFAULT_ASSIGNMENT_RESPONSE["fit"],
+    subscriptionState=DEFAULT_ASSIGNMENT_RESPONSE["sub"],
+    subscriptionTier=DEFAULT_ASSIGNMENT_RESPONSE["subTier"],
+    variant=DEFAULT_ASSIGNMENT_RESPONSE["variant"],
+    machineShape=DEFAULT_ASSIGNMENT_RESPONSE["machineShape"],
+    runtimeProxyInfo=DEFAULT_ASSIGNMENT_RESPONSE["runtimeProxyInfo"],
+    outcome=Outcome.SUCCESS,
 )
 
 
@@ -97,6 +114,16 @@ class TestColabClient(unittest.TestCase):
         assignments = self.client.list_assignments()
         self.assertEqual(assignments, DEFAULT_LIST_ASSIGNMENTS_RESPONSE.assignments)
         mock_request.assert_called_once()
+
+    @patch("colab_mcp.client.ColabClient._post_assignment")
+    @patch("colab_mcp.client.ColabClient._get_assignment")
+    def test_assign_creates_new(self, mock_get_assignment, mock_post_assignment):
+        mock_get_assignment.return_value = MagicMock(xsrf_token="mock-xsrf-token")
+        mock_post_assignment.return_value = DEFAULT_ASSIGNMENT
+
+        result = self.client.assign(NOTEBOOK_HASH, Variant.DEFAULT)
+        self.assertEqual(result["assignment"], DEFAULT_ASSIGNMENT)
+        self.assertTrue(result["is_new"])
 
 
 if __name__ == "__main__":
