@@ -25,7 +25,7 @@ class ColabWebSocketServer:
         self.port = port
         self.connection_lock = asyncio.Lock()
         self.connection_live = asyncio.Event()
-        self.allowed_origin_fragment = r"colab\.(\w+\.)?google\.com"
+        self.allowed_origins = ["https://colab.google.com"]
         self._server: websockets.Server | None = None
 
         self.read_stream: MemoryObjectReceiveStream[SessionMessage | Exception]
@@ -75,12 +75,6 @@ class ColabWebSocketServer:
         
         async with self.connection_lock:
             try:
-                origin = websocket.request.headers.get("Origin", "")
-                if not re.match(self.allowed_origin_fragment, origin):
-                    logging.warning(f"Refused connection from unauthorized origin: {origin}")
-                    await websocket.close(code=1008, reason="Unauthorized Origin")
-                    return
-
                 self.connection_live.set()
                 
                 reading_task = asyncio.create_task(self._read_from_socket(websocket))
@@ -92,7 +86,7 @@ class ColabWebSocketServer:
 
             except websockets.exceptions.ConnectionClosed as e:
                 logging.info(f"Connection closed: {e.code} - {e.reason}")
-                await self.incoming_messages.put(Exception("Colab Frontend disconnected"))
+                await self._read_stream_writer.send(Exception("Colab Frontend disconnected"))
             except Exception as e:
                 logging.error(f"Unexpected error: {e}")
             finally:
@@ -104,7 +98,7 @@ class ColabWebSocketServer:
         # Set the SO_REUSEADDR option to allow the address to be reused immediately
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self.host, self.port))
-        self._server = await websockets.serve(self._connection_handler, sock=sock, subprotocols=[Subprotocol("mcp")])
+        self._server = await websockets.serve(self._connection_handler, sock=sock, subprotocols=[Subprotocol("mcp")], origins=self.allowed_origins)
         return self
 
     async def __aexit__ (self, exc_type, exc_val, exc_tb):

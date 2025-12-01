@@ -15,7 +15,7 @@ async def test_successful_connection():
   async with ColabWebSocketServer(port=TEST_PORT) as server:
     client = await websockets.connect(
         f"ws://localhost:{TEST_PORT}",
-        origin="colab.google.com",
+        origin="https://colab.google.com",
         subprotocols=["mcp"],
     )
     assert server.connection_live.is_set()
@@ -31,16 +31,12 @@ async def test_successful_connection():
 @pytest.mark.asyncio
 async def test_unauthorized_origin_rejected():
   async with ColabWebSocketServer(port=TEST_PORT) as server:
-    client_conn = await websockets.connect(
+    with pytest.raises(websockets.exceptions.InvalidStatus):
+      await websockets.connect(
         f"ws://localhost:{TEST_PORT}",
-        origin="wrong.com",
+        origin="https://wrong.com",
         subprotocols=["mcp"],
     )
-    with pytest.raises(websockets.exceptions.ConnectionClosed):
-      await client_conn.ping()
-    
-    assert client_conn.close_code == 1008
-    assert client_conn.close_reason == 'Unauthorized Origin'
     assert not server.connection_live.is_set()
 
 @pytest.mark.asyncio
@@ -48,14 +44,14 @@ async def test_second_connection_rejected():
   async with ColabWebSocketServer(port=TEST_PORT) as server:
     client1 = await websockets.connect(
         f"ws://localhost:{TEST_PORT}",
-        origin="colab.google.com",
+        origin="https://colab.google.com",
         subprotocols=["mcp"],
     )
     assert server.connection_live.is_set()
 
     client2 = await websockets.connect(
         f"ws://localhost:{TEST_PORT}",
-        origin="colab.google.com",
+        origin="https://colab.google.com",
         subprotocols=["mcp"],
     )
 
@@ -74,7 +70,7 @@ async def test_incoming_message_handling():
   async with ColabWebSocketServer(port=TEST_PORT) as server:
     client = await websockets.connect(
         f"ws://localhost:{TEST_PORT}",
-        origin="colab.google.com",
+        origin="https://colab.google.com",
         subprotocols=["mcp"],
     )
     assert server.connection_live.is_set()
@@ -99,7 +95,7 @@ async def test_outgoing_message_handling():
   async with ColabWebSocketServer(port=TEST_PORT) as server:
     client = await websockets.connect(
         f"ws://localhost:{TEST_PORT}",
-        origin="colab.google.com",
+        origin="https://colab.google.com",
         subprotocols=["mcp"],
     )
     assert server.connection_live.is_set()
@@ -125,7 +121,7 @@ async def test_malformed_incoming_message():
   async with ColabWebSocketServer(port=TEST_PORT) as server:
     client = await websockets.connect(
         f"ws://localhost:{TEST_PORT}",
-        origin="colab.google.com",
+        origin="https://colab.google.com",
         subprotocols=["mcp"],
     )
     assert server.connection_live.is_set()
