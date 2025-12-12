@@ -9,9 +9,12 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "anyio>=4.5",
     "fastmcp>=2.2.0",
-    "pydantic>=2.12.3",
+    "mcp[cli]>=1.20.0",
+    "pydantic>=2.12.3,<3.0.0",
     "requests>=2.32.5",
+    "websockets>=15.0.1",
 ]
 
 [project.scripts]
