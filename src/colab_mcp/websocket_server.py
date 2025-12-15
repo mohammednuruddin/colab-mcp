@@ -95,8 +95,6 @@ class ColabWebSocketServer:
     async def __aenter__ (self):
         logging.info(f"Starting WebSocket server on ws://{self.host}:{self.port}")
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Set the SO_REUSEADDR option to allow the address to be reused immediately
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self.host, self.port))
         self._server = await websockets.serve(self._connection_handler, sock=sock, subprotocols=[Subprotocol("mcp")], origins=self.allowed_origins)
         return self
