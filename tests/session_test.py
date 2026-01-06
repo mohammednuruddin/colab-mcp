@@ -12,15 +12,6 @@ from contextlib import closing
 
 import pytest
 
-
-@pytest.fixture
-def free_port():
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-        s.bind(("", 0))
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        return s.getsockname()[1]
-
-
 @pytest.fixture
 def mock_wss():
     """Provides a mock ColabWebSocketServer instance."""
@@ -38,34 +29,6 @@ class MockColabWebSocketServer:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         pass
-
-
-def ws_send_json(ws, msg: types.JSONRPCMessage):
-    ws.send(msg.model_dump_json(by_alias=True, exclude_none=True))
-
-
-async def fakeFrontendConnection(port):
-    async with websockets.connect(
-        f"ws://localhost:{port}",
-        origin="https://colab.google.com",
-        subprotocols=["mcp"],
-    ) as ws:
-        # send notification on connect
-        notification = types.ToolListChangedNotification()
-        ws_send_json(ws, notification)
-        async for message in ws:
-            rpc = types.JSONRPCMessage.model_validate_json(message)
-            match rpc:
-                case types.CallToolRequest():
-                    resp = types.CallToolResult(id=rpc.id)
-                    result = types.TextContent("a tool result")
-                    resp.content = [result]
-                    ws_send_json(ws, resp)
-                case types.ListToolsRequest():
-                    tool_a = types.Tool(name="tool_a")
-                    tool_b = types.Tool(name="tool_b")
-                    resp = types.ListToolsResult(id=rpc.id, tools=[tool_a, tool_b])
-                    ws_send_json(ws, resp)
 
 
 class TestColabProxyMiddleware:
