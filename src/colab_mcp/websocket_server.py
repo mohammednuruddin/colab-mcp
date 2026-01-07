@@ -5,12 +5,14 @@ import logging
 import mcp.types as types
 from mcp.shared.message import SessionMessage
 from pydantic_core import ValidationError
-import re
+import secrets
 import socket
 import websockets
-from websockets.typing import Subprotocol
 from websockets.asyncio.server import ServerConnection
+from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosed
+from websockets.http11 import Request, Response
+from websockets.typing import Subprotocol
 
 WEB_SOCKET_PORT = 9998
 
@@ -35,6 +37,7 @@ class ColabWebSocketServer:
 
         self._read_stream_writer, self.read_stream = anyio.create_memory_object_stream(0)
         self.write_stream, self._write_stream_reader = anyio.create_memory_object_stream(0)
+        self.token = secrets.token_urlsafe(16)
 
     async def _read_from_socket(self, websocket):
         """Listens to the socket and puts messages into the read stream."""
@@ -62,6 +65,22 @@ class ColabWebSocketServer:
         except (anyio.ClosedResourceError, anyio.EndOfStream):
             #server closed write stream
             pass
+
+    def _validate_authorization(self, websocket: ServerConnection, request: Request):
+        try:
+            headers: Headers = request.headers
+            auth_header = headers.get("Authorization")
+            if not auth_header:
+                return Response(401, "Missing authorization", Headers([]))
+            scheme, token = auth_header.split(None, 1)
+            if scheme.lower() != 'bearer':
+                return Response(400, "Invalid authorization header", Headers([]))
+        except ValueError:
+            return Response(400, "Invalid header format", Headers([]))
+        if token == self.token:
+            return None
+        return Response(403, "Bad authorization token", Headers([]))
+
 
     async def _connection_handler(self, websocket: ServerConnection):
         """
@@ -98,7 +117,7 @@ class ColabWebSocketServer:
         # Set the SO_REUSEADDR option to allow the address to be reused immediately
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self.host, self.port))
-        self._server = await websockets.serve(self._connection_handler, sock=sock, subprotocols=[Subprotocol("mcp")], origins=self.allowed_origins)
+        self._server = await websockets.serve(self._connection_handler, sock=sock, subprotocols=[Subprotocol("mcp")], origins=self.allowed_origins, process_request=self._validate_authorization)
         return self
 
     async def __aexit__ (self, exc_type, exc_val, exc_tb):
