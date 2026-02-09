@@ -1,39 +1,87 @@
+import argparse
 import asyncio
+import datetime
 import logging
 import sys
 
 from fastmcp import FastMCP
+from fastmcp.utilities import logging as fastmcp_logger
 
 from colab_mcp import runtime
 from colab_mcp import auth
 from colab_mcp.session import ColabSessionProxy
 
-import jupyter_kernel_client
 
 mcp = FastMCP(name="ColabMCP")
 
 
-async def main_async():
-    # initialize credentials when we start so they're available
-    # after.
-    creds = auth.GoogleOAuthClient.get_credentials()
-    if not creds.token:
-        sys.exit("failed to initialize authentication credentials, exiting!")
+def init_logger():
+    log_filename = datetime.datetime.now().strftime(
+        "logs/colab-mcp.%Y-%m-%d_%H-%M-%S.log"
+    )
     logging.basicConfig(
-        filename="colab-mcp.log",  # Specify the log file name
+        format="%(asctime)s %(levelname)s:%(message)s",
+        datefmt="%m/%d/%Y %I:%M:%S %p",
+        filename=log_filename,
         level=logging.INFO,  # Set the minimum logging level to capture
     )
-    logging.info(
-        "using mcp server: %s, kernel client: %s" % (runtime.mcp, jupyter_kernel_client)
+    fastmcp_logger.get_logger("colab-mcp").info("logging to %s" % log_filename)
+
+
+def parse_args(v):
+    parser = argparse.ArgumentParser(
+        description="ColabMCP is an MCP server that lets you interact with Colab."
     )
-    await mcp.import_server(runtime.mcp, prefix="runtime")
-    session_mcp = ColabSessionProxy()
-    await session_mcp.start_proxy_server()
-    mcp.mount(session_mcp.proxy_server)
-    for middleware in session_mcp.middleware:
-        mcp.add_middleware(middleware)
-    await mcp.run_async()
-    await session_mcp.cleanup()
+    parser.add_argument(
+        "-r",
+        "--enable-runtime",
+        help="if set, export tools to talk directly to the Colab Jupyter runtime (disabled by default).",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "-p",
+        "--enable-proxy",
+        help="if set, enable the runtime proxy (enabled by default).",
+        action="store_true",
+        default=True,
+    )
+    return parser.parse_args(v)
+
+
+async def main_async():
+    args = parse_args(sys.argv[1:])
+    init_logger()
+
+    # preemptively initialize credentials when we start so they're available
+    try:
+        auth.GoogleOAuthClient.get_session()
+    except PermissionError as e:
+        sys.exit(f"failed to initialize authentication credentials, exiting - {e}")
+
+    if args.enable_runtime:
+        crt = runtime.ColabRuntimeTool()
+        logging.info("enabling runtime tools")
+        mcp.mount(crt.mcp, prefix="runtime")
+
+    if args.enable_proxy:
+        logging.info("enabling session proxy tools")
+        session_mcp = ColabSessionProxy()
+        await session_mcp.start_proxy_server()
+        mcp.mount(session_mcp.proxy_server)
+        for middleware in session_mcp.middleware:
+            mcp.add_middleware(middleware)
+
+    try:
+        await mcp.run_async()
+
+    finally:
+        if args.enable_proxy:
+            await session_mcp.cleanup()
+
+        if args.enable_runtime:
+            if crt:
+                crt.stop()
 
 
 def main() -> None:
