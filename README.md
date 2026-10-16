@@ -56,9 +56,15 @@ Run from this checkout with `uv run --project /path/to/colab-mcp colab-mcp`.
   `--state-dir` or `COLAB_MCP_STATE_DIR`) so a connected tab survives a server restart.
   `--ephemeral` restores the upstream behaviour of a fresh token and port each start,
   and `--port` pins the websocket port.
+- **Token rotation.** The token rides in the URL fragment of every Colab link the server
+  opens, so it ends up in browser history. A persisted token is replaced once it is older
+  than `COLAB_MCP_TOKEN_MAX_AGE_DAYS` (default 30; `0` never), or immediately with
+  `--rotate-token`. The port and last notebook are kept; an open tab must be re-opened.
 - **Automatic re-open.** If the tab drops and the agent calls a notebook tool, the server
-  re-opens the last notebook and waits for the connection instead of failing. Set
-  `COLAB_MCP_AUTO_REOPEN=0` to disable.
+  re-opens the notebook it last opened and waits for the connection instead of failing.
+  Only notebooks opened by the running server are re-opened: the one saved by a previous
+  process is reported as `previous_notebook_url` and named in the "not connected" error,
+  but never opened unprompted. Set `COLAB_MCP_AUTO_REOPEN=0` to disable.
 - **Cancellation-safe waits.** Upstream's wait for the browser used `gather` inside
   `wait_for`; a timeout or a cancelled tool call killed the long-lived MCP client, after
   which every tab was dropped the instant it connected. The wait no longer cancels the
@@ -82,6 +88,10 @@ This fork adds server-side tools built on them:
 | `upload_file` | Copy a local file to the runtime in base64 chunks, verified by SHA-256. |
 | `download_file` | Copy a runtime file to this machine, verified by SHA-256. |
 | `export_notebook` | Save the connected notebook as `.ipynb` (nbformat 4). |
+
+Executions are serialised per runtime: a foreground `run_code` or file transfer waits for
+a background job's current cell to finish and then runs before the job's next cell, so two
+cells never execute at once and temporary cells never collide.
 
 Large outputs: the websocket bridge now accepts messages up to 64 MiB (the library
 default of 1 MiB dropped the connection on a ~400 KB output). A proxied or composite

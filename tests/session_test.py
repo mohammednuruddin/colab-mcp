@@ -14,7 +14,9 @@
 
 import asyncio
 import copy
+import time
 from colab_mcp import session
+from colab_mcp.state import ConnectionState, load_state, save_state
 from fastmcp.server.middleware import MiddlewareContext
 import pytest
 from unittest.mock import patch, AsyncMock, Mock
@@ -58,6 +60,7 @@ def mock_proxy_client(mock_wss):
     client.is_connected.return_value = False
     client.requested_notebook_url = None
     client.notebook_url = None
+    client.previous_notebook_url = None
     return client
 
 
@@ -271,6 +274,7 @@ class TestConnectionStatusTool:
             == "https://colab.research.google.com/drive/abc"
         )
         assert status["session_dead"] is False
+        assert status["previous_notebook_url"] is None
         assert status["proxy_port"] == 1234
         assert status["server_pid"] > 0
         status = await session.connection_status_tool_fn(
@@ -540,6 +544,29 @@ class TestAutoReopen:
         call_next.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_notebook_from_previous_process_is_not_reopened(
+        self, mock_proxy_client, mock_webbrowser
+    ):
+        mock_proxy_client.previous_notebook_url = (
+            "https://colab.research.google.com/drive/old"
+        )
+        mock_proxy_client.is_connected.return_value = False
+        middleware = session.ColabProxyMiddleware(mock_proxy_client)
+        context = Mock()
+        context.message.name = "run_code"
+        call_next = AsyncMock(return_value="ran")
+
+        async def passthrough(_wss, call, _message):
+            return await call
+
+        with (
+            patch("colab_mcp.session.AUTO_REOPEN", True),
+            patch("colab_mcp.session.until_disconnect", passthrough),
+        ):
+            assert await middleware.on_call_tool(context, call_next) == "ran"
+        mock_webbrowser.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_injected_tools_never_trigger_reopen(
         self, mock_proxy_client, mock_webbrowser
     ):
@@ -571,13 +598,64 @@ class TestPersistedIdentity:
             assert second.wss.token == token
             assert second.wss.port == port
             client = second.middleware[0].proxy_client
+            # Reported, but not a target for auto re-open after a restart.
             assert (
-                client.requested_notebook_url
+                client.previous_notebook_url
                 == "https://colab.research.google.com/drive/abc"
             )
+            assert client.requested_notebook_url is None
             assert (tmp_path / "connection.json").stat().st_mode & 0o777 == 0o600
         finally:
             await second.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_rotate_token_keeps_port_and_last_notebook(self, tmp_path):
+        first = session.ColabSessionProxy(state_dir=tmp_path)
+        await first.start_proxy_server()
+        token, port = first.wss.token, first.wss.port
+        first._persist("https://colab.research.google.com/drive/abc")
+        await first.cleanup()
+
+        second = session.ColabSessionProxy(state_dir=tmp_path, rotate_token=True)
+        await second.start_proxy_server()
+        try:
+            assert second.wss.token != token
+            assert second.wss.port == port
+            saved = load_state(tmp_path)
+            assert saved.token == second.wss.token
+            assert (
+                saved.last_notebook_url == "https://colab.research.google.com/drive/abc"
+            )
+        finally:
+            await second.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_expired_token_is_replaced(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("COLAB_MCP_TOKEN_MAX_AGE_DAYS", "30")
+        save_state(
+            tmp_path, ConnectionState(token="old-token", port=1, token_created=0.0)
+        )
+        proxy = session.ColabSessionProxy(state_dir=tmp_path, port=0)
+        await proxy.start_proxy_server()
+        try:
+            assert proxy.wss.token != "old-token"
+            assert load_state(tmp_path).token_created > 0
+        finally:
+            await proxy.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_unexpired_token_keeps_its_age(self, tmp_path):
+        created = time.time() - 86400
+        save_state(
+            tmp_path, ConnectionState(token="tok", port=1, token_created=created)
+        )
+        proxy = session.ColabSessionProxy(state_dir=tmp_path, port=0)
+        await proxy.start_proxy_server()
+        try:
+            assert proxy.wss.token == "tok"
+            assert load_state(tmp_path).token_created == created
+        finally:
+            await proxy.cleanup()
 
     @pytest.mark.asyncio
     async def test_ephemeral_writes_nothing(self, tmp_path, monkeypatch):

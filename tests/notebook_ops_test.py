@@ -275,6 +275,40 @@ class TestRunTools:
         assert status["completed_cells"] == 1
 
     @pytest.mark.asyncio
+    async def test_foreground_and_background_never_execute_concurrently(self):
+        colab = FakeColab([code_cell(f"c{i}", f"print({i})") for i in range(3)])
+        original = colab.call_tool
+        in_flight = 0
+        peak = 0
+
+        async def slow(name, args, raise_on_error=True):
+            nonlocal in_flight, peak
+            if name != "run_code_cell":
+                return await original(name, args, raise_on_error)
+            in_flight += 1
+            peak = max(peak, in_flight)
+            try:
+                for _ in range(3):
+                    await asyncio.sleep(0)
+                return await original(name, args, raise_on_error)
+            finally:
+                in_flight -= 1
+
+        colab.call_tool = slow
+        ctx = make_ctx(colab)
+        started = await ops.run_notebook(ctx=ctx)
+        first, second = await asyncio.gather(
+            ops.run_code("print('a')", ctx=ctx), ops.run_code("print('b')", ctx=ctx)
+        )
+        await ops.JOBS[started["job_id"]].task
+
+        assert peak == 1
+        assert first.structured_content["stdout"] == "a\n"
+        assert second.structured_content["stdout"] == "b\n"
+        assert (await ops.job_status(started["job_id"]))["state"] == "done"
+        assert [c["id"] for c in colab.cells] == ["c0", "c1", "c2"]
+
+    @pytest.mark.asyncio
     async def test_run_code_temp_cell_is_removed_and_images_returned(self):
         colab = FakeColab([code_cell("a", "1")])
         result = await ops.run_code("print('hi')", ctx=make_ctx(colab))

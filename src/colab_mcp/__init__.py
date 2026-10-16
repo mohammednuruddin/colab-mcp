@@ -68,6 +68,13 @@ def parse_args(v):
         default=False,
     )
     parser.add_argument(
+        "--rotate-token",
+        help="issue a new persisted connection token now; connected tabs must be re-opened "
+        "(tokens also rotate after COLAB_MCP_TOKEN_MAX_AGE_DAYS, default 30)",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
         "--port",
         help="fixed websocket port for the Colab tab to connect to (default: the persisted port, else any free port)",
         type=int,
@@ -94,6 +101,7 @@ async def main_async():
             state_dir=Path(args.state_dir).expanduser() if args.state_dir else None,
             ephemeral=args.ephemeral,
             port=args.port,
+            rotate_token=args.rotate_token,
         )
         await session_mcp.start_proxy_server()
         mcp.mount(session_mcp.proxy_server)

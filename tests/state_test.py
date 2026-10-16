@@ -12,17 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from colab_mcp.state import ConnectionState, load_state, save_state
+import json
+
+from colab_mcp.state import ConnectionState, load_state, save_state, token_max_age_days
 
 
 def test_round_trip(tmp_path):
     save_state(
         tmp_path,
-        ConnectionState(token="tok", port=4321, last_notebook_url="https://x/nb"),
+        ConnectionState(
+            token="tok", port=4321, last_notebook_url="https://x/nb", token_created=5.0
+        ),
     )
     state = load_state(tmp_path)
     assert state == ConnectionState(
-        token="tok", port=4321, last_notebook_url="https://x/nb"
+        token="tok", port=4321, last_notebook_url="https://x/nb", token_created=5.0
     )
     assert (tmp_path / "connection.json").stat().st_mode & 0o777 == 0o600
 
@@ -33,3 +37,26 @@ def test_missing_and_malformed(tmp_path):
     assert load_state(tmp_path) is None
     (tmp_path / "connection.json").write_text('{"token": "", "port": 99999}')
     assert load_state(tmp_path) is None
+
+
+def test_legacy_file_without_token_created_is_not_expired(tmp_path):
+    (tmp_path / "connection.json").write_text(json.dumps({"token": "t", "port": 80}))
+    state = load_state(tmp_path)
+    assert state.token == "t"
+    assert not state.token_expired(30)
+
+
+def test_token_expiry():
+    state = ConnectionState(token="t", port=1, token_created=0.0)
+    assert state.token_expired(30, now=31 * 86400)
+    assert not state.token_expired(30, now=29 * 86400)
+    assert not state.token_expired(0, now=10**12)
+
+
+def test_token_max_age_env(monkeypatch):
+    monkeypatch.delenv("COLAB_MCP_TOKEN_MAX_AGE_DAYS", raising=False)
+    assert token_max_age_days() == 30
+    monkeypatch.setenv("COLAB_MCP_TOKEN_MAX_AGE_DAYS", "0")
+    assert token_max_age_days() == 0
+    monkeypatch.setenv("COLAB_MCP_TOKEN_MAX_AGE_DAYS", "soon")
+    assert token_max_age_days() == 30

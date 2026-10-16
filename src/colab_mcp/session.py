@@ -44,6 +44,7 @@ from colab_mcp.state import (
     load_state,
     new_token,
     save_state,
+    token_max_age_days,
 )
 from colab_mcp.websocket_server import ColabWebSocketServer
 from fastmcp.exceptions import ToolError
@@ -98,6 +99,10 @@ class ColabProxyClient:
         # us which notebook it is, so this is the URL we sent it to.
         self.requested_notebook_url: str | None = None
         self.notebook_url: str | None = None
+        # The notebook a previous server process last connected to. Reported by
+        # the status tool but never auto-reopened: it may belong to work from
+        # days ago, and opening it unprompted surprises the user.
+        self.previous_notebook_url: str | None = None
         self.on_connected = None
         self._recycle_task: asyncio.Task | None = None
         self._recycle_lock = asyncio.Lock()
@@ -423,6 +428,7 @@ async def connection_status_tool_fn(ctx: Context = CurrentContext()) -> dict:
         "connected": connected,
         "notebook_url": (client.notebook_url if client and connected else None),
         "requested_notebook_url": client.requested_notebook_url if client else None,
+        "previous_notebook_url": client.previous_notebook_url if client else None,
         "session_dead": client.session_is_dead() if client else None,
         "proxy_port": ctx.get_state(PROXY_PORT_KEY),
         "auto_reopen": AUTO_REOPEN,
@@ -460,6 +466,7 @@ class ColabSessionProxy:
         state_dir: Path | None = None,
         ephemeral: bool = False,
         port: int | None = None,
+        rotate_token: bool = False,
     ):
         self._exit_stack = AsyncExitStack()
         self.proxy_server: FastMCPProxy | None = None
@@ -469,17 +476,22 @@ class ColabSessionProxy:
         self.ephemeral = ephemeral
         self.state_dir = None if ephemeral else (state_dir or default_state_dir())
         self.port = port
+        self.rotate_token = rotate_token
         self.state: ConnectionState | None = None
 
     def _persist(self, notebook_url: str | None = None):
         if self.ephemeral or self.wss is None or self.state_dir is None:
             return
-        previous = self.state.last_notebook_url if self.state else None
+        previous = self.state
         self.state = ConnectionState(
             token=self.wss.token,
             port=self.wss.port,
-            last_notebook_url=notebook_url or previous,
+            last_notebook_url=notebook_url
+            or (previous.last_notebook_url if previous else None),
         )
+        # A rotated token gets a fresh age; an unchanged one keeps its own.
+        if previous is not None and previous.token == self.wss.token:
+            self.state.token_created = previous.token_created
         try:
             save_state(self.state_dir, self.state)
         except OSError as exc:
@@ -489,7 +501,15 @@ class ColabSessionProxy:
 
     async def start_proxy_server(self):
         saved = None if self.ephemeral else load_state(self.state_dir)
+        self.state = saved
         token = saved.token if saved else new_token()
+        if saved and (self.rotate_token or saved.token_expired(token_max_age_days())):
+            reason = "--rotate-token" if self.rotate_token else "token expired"
+            logging.info(
+                "Issuing a new connection token (%s); open tabs must be re-opened",
+                reason,
+            )
+            token = new_token()
         port = self.port if self.port is not None else (saved.port if saved else 0)
         self.wss = await self._exit_stack.enter_async_context(
             ColabWebSocketServer(port=port, token=token)
@@ -503,8 +523,7 @@ class ColabSessionProxy:
         self.wss.on_disconnect = proxy_client.handle_disconnect
         proxy_client.on_connected = self._persist
         if saved and saved.last_notebook_url:
-            # Lets auto re-open bring back the last notebook after a restart.
-            proxy_client.requested_notebook_url = saved.last_notebook_url
+            proxy_client.previous_notebook_url = saved.last_notebook_url
         SERVER_INFO["state_dir"] = str(self.state_dir) if self.state_dir else None
         SERVER_INFO["ephemeral"] = self.ephemeral
         self.proxy_server = FastMCPProxy(

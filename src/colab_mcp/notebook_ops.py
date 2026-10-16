@@ -59,20 +59,41 @@ MAX_IMAGE_BYTES = 2 * 1024 * 1024
 def _proxy(ctx: Context):
     proxy = ctx.get_state(PROXY_CLIENT_KEY)
     if proxy is None or not proxy.is_connected() or proxy.proxy_mcp_client is None:
-        raise ToolError(
+        message = (
             "No Colab tab is connected. Call open_colab_browser_connection (optionally with "
             "notebook_url) and have the user accept the connection first."
         )
+        previous = getattr(proxy, "previous_notebook_url", None)
+        if isinstance(previous, str) and previous:
+            message += (
+                f" Before the server restarted the connected notebook was {previous}."
+            )
+        raise ToolError(message)
     return proxy
 
 
 def _client(ctx: Context):
     proxy = _proxy(ctx)
     client = proxy.proxy_mcp_client
-    # Tag the client with its websocket server so _call can fail fast on a drop.
+    # Tag the client with its websocket server so _call can fail fast on a drop,
+    # and with the lock that serialises execution on its runtime.
     with contextlib.suppress(AttributeError):
         client._colab_wss = proxy.wss
+        if getattr(client, "_colab_run_lock", None) is None:
+            client._colab_run_lock = asyncio.Lock()
     return client
+
+
+def _run_lock(client):
+    """One execution at a time per runtime.
+
+    A background job and a foreground call would otherwise run cells on the
+    same kernel concurrently, and two temporary cells placed from the same
+    stale cell count would collide. The lock covers one cell's execution, not
+    a whole job, so a foreground call can still run between a job's cells.
+    """
+    lock = getattr(client, "_colab_run_lock", None)
+    return lock if lock is not None else contextlib.nullcontext()
 
 
 async def _call(client, name: str, args: dict[str, Any]) -> Any:
@@ -222,21 +243,29 @@ async def _delete_quiet(client, cell_id: str) -> None:
         logging.warning("Could not delete temporary cell %s: %s", cell_id, exc)
 
 
-async def _run(client, cell_id: str, max_chars: int) -> dict[str, Any]:
+async def _execute(client, cell_id: str, max_chars: int) -> dict[str, Any]:
     payload = await _call(client, "run_code_cell", {"cellId": cell_id})
     outputs = payload.get("outputs") if isinstance(payload, dict) else None
     return summarize_outputs(outputs or [], max_chars)
 
 
+async def _run(client, cell_id: str, max_chars: int) -> dict[str, Any]:
+    async with _run_lock(client):
+        return await _execute(client, cell_id, max_chars)
+
+
 async def _run_temp(
     client, code: str, max_chars: int, keep: bool = False
 ) -> dict[str, Any]:
-    cell_id = await _add_temp_cell(client, code)
-    try:
-        summary = await _run(client, cell_id, max_chars)
-    finally:
-        if not keep:
-            await _delete_quiet(client, cell_id)
+    # Held from placement to deletion so no other temporary cell is added at
+    # the same index and nothing else executes in between.
+    async with _run_lock(client):
+        cell_id = await _add_temp_cell(client, code)
+        try:
+            summary = await _execute(client, cell_id, max_chars)
+        finally:
+            if not keep:
+                await _delete_quiet(client, cell_id)
     summary["cell_id"] = cell_id if keep else None
     return summary
 
