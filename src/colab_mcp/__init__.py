@@ -22,7 +22,9 @@ import sys
 from fastmcp import FastMCP
 from fastmcp.utilities import logging as fastmcp_logger
 
-from colab_mcp.session import ColabSessionProxy
+from pathlib import Path
+
+from colab_mcp.session import SERVER_INFO, ColabSessionProxy
 
 
 mcp = FastMCP(name="ColabMCP")
@@ -54,6 +56,24 @@ def parse_args(v):
         default=tempfile.mkdtemp(prefix="colab-mcp-logs-"),
     )
     parser.add_argument(
+        "--state-dir",
+        help="directory for the persisted connection token/port (default: ~/.colab-mcp, or COLAB_MCP_STATE_DIR)",
+        action="store",
+        default=None,
+    )
+    parser.add_argument(
+        "--ephemeral",
+        help="do not persist the connection token/port; a connected tab will not survive a restart",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--port",
+        help="fixed websocket port for the Colab tab to connect to (default: the persisted port, else any free port)",
+        type=int,
+        default=None,
+    )
+    parser.add_argument(
         "-p",
         "--enable-proxy",
         help="if set, enable the runtime proxy (enabled by default).",
@@ -66,10 +86,15 @@ def parse_args(v):
 async def main_async():
     args = parse_args(sys.argv[1:])
     init_logger(args.log)
+    SERVER_INFO["log_dir"] = args.log
 
     if args.enable_proxy:
         logging.info("enabling session proxy tools")
-        session_mcp = ColabSessionProxy()
+        session_mcp = ColabSessionProxy(
+            state_dir=Path(args.state_dir).expanduser() if args.state_dir else None,
+            ephemeral=args.ephemeral,
+            port=args.port,
+        )
         await session_mcp.start_proxy_server()
         mcp.mount(session_mcp.proxy_server)
         for middleware in session_mcp.middleware:

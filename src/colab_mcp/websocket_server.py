@@ -31,6 +31,10 @@ from websockets.typing import Subprotocol
 COLAB = "https://colab.research.google.com"
 COLAB_ALT_DOMAIN = "https://colab.google.com"
 SCRATCH_PATH = "/notebooks/empty.ipynb"
+# Largest single MCP message the bridge accepts. The library default of 1 MiB
+# dropped the connection on a ~400 KB cell output; notebook outputs and file
+# transfer chunks can legitimately be larger.
+MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 
 
 class ColabWebSocketServer:
@@ -39,11 +43,24 @@ class ColabWebSocketServer:
     from a Google Colab session (colab.google.com).
     """
 
-    def __init__(self, host="localhost"):
+    def __init__(
+        self,
+        host="localhost",
+        port: int = 0,
+        token: str | None = None,
+        on_disconnect=None,
+    ):
         self.host = host
         self.port = 0
+        self.requested_port = port
+        # Called (synchronously) after a connected tab drops, so the owner can
+        # recycle the MCP session that was bound to it.
+        self.on_disconnect = on_disconnect
         self.connection_lock = asyncio.Lock()
         self.connection_live = asyncio.Event()
+        # Set while no tab is attached; lets an in-flight call notice a drop.
+        self.disconnected = asyncio.Event()
+        self.disconnected.set()
         self.allowed_origins = [COLAB, COLAB_ALT_DOMAIN]
         self._server: websockets.Server | None = None
 
@@ -51,17 +68,44 @@ class ColabWebSocketServer:
         self._read_stream_writer: MemoryObjectSendStream[SessionMessage | Exception]
         self.write_stream: MemoryObjectSendStream[SessionMessage]
         self._write_stream_reader: MemoryObjectReceiveStream[SessionMessage]
+        self.reset_streams()
+        self.token = token or secrets.token_urlsafe(16)
+        self._active_connection: ServerConnection | None = None
 
+    def reset_streams(self):
+        """Create fresh MCP message streams.
+
+        An MCP ClientSession closes the streams it was given when it shuts
+        down, so switching to a different notebook (which starts a new
+        session) needs new streams before the next browser tab connects.
+        """
         self._read_stream_writer, self.read_stream = anyio.create_memory_object_stream(
             0
         )
         self.write_stream, self._write_stream_reader = (
             anyio.create_memory_object_stream(0)
         )
-        self.token = secrets.token_urlsafe(16)
+
+    async def disconnect(self):
+        """Close the connected Colab tab's socket, if any, and wait for it to drop."""
+        connection = self._active_connection
+        if connection is None:
+            return
+        await connection.close(code=1000, reason="Switching notebook")
+        # The handler clears connection_live in its finally block; give it a moment.
+        for _ in range(50):
+            if not self.connection_live.is_set():
+                break
+            await asyncio.sleep(0.02)
 
     async def _read_from_socket(self, websocket):
         """Listens to the socket and puts messages into the read stream."""
+        try:
+            await self._pump_socket(websocket)
+        except websockets.exceptions.ConnectionClosed as e:
+            logging.info(f"Colab tab connection closed: {e.code} - {e.reason}")
+
+    async def _pump_socket(self, websocket):
         async for msg in websocket:
             try:
                 client_message = types.JSONRPCMessage.model_validate_json(msg)
@@ -119,6 +163,8 @@ class ColabWebSocketServer:
 
         async with self.connection_lock:
             try:
+                self._active_connection = websocket
+                self.disconnected.clear()
                 self.connection_live.set()
 
                 reading_task = asyncio.create_task(self._read_from_socket(websocket))
@@ -138,17 +184,36 @@ class ColabWebSocketServer:
             except Exception as e:
                 logging.error(f"Unexpected error: {e}")
             finally:
+                self._active_connection = None
                 self.connection_live.clear()
+                self.disconnected.set()
+                if self.on_disconnect is not None:
+                    try:
+                        self.on_disconnect()
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logging.error(f"on_disconnect handler failed: {exc}")
 
-    async def __aenter__(self):
-        self._server = await websockets.serve(
+    async def _serve(self, port: int):
+        return await websockets.serve(
             self._connection_handler,
             host=self.host,
-            port=0,
+            port=port,
             subprotocols=[Subprotocol("mcp")],
             origins=self.allowed_origins,
             process_request=self._validate_authorization,
+            max_size=MAX_MESSAGE_BYTES,
         )
+
+    async def __aenter__(self):
+        try:
+            self._server = await self._serve(self.requested_port)
+        except OSError as exc:
+            if not self.requested_port:
+                raise
+            logging.warning(
+                f"Port {self.requested_port} unavailable ({exc}); a connected tab will need to be re-opened"
+            )
+            self._server = await self._serve(0)
         self.port = self._server.sockets[0].getsockname()[1]
         logging.info(f"Starting WebSocket server on ws://{self.host}:{self.port}")
         return self

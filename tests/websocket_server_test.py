@@ -21,7 +21,9 @@ import websockets
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("origin_domain", ["https://colab.google.com", "https://colab.research.google.com"])
+@pytest.mark.parametrize(
+    "origin_domain", ["https://colab.google.com", "https://colab.research.google.com"]
+)
 async def test_successful_connection(origin_domain):
     async with ColabWebSocketServer() as server:
         client = await websockets.connect(
@@ -219,3 +221,100 @@ async def test_token_in_url():
 
         assert not server.connection_live.is_set()
         assert not server.connection_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_drops_active_tab_and_allows_reconnect():
+    async with ColabWebSocketServer() as server:
+        client1 = await websockets.connect(
+            f"ws://localhost:{server.port}",
+            origin="https://colab.google.com",
+            subprotocols=["mcp"],
+            additional_headers={"Authorization": f"Bearer {server.token}"},
+        )
+        assert server.connection_live.is_set()
+
+        await server.disconnect()
+        await client1.wait_closed()
+        assert not server.connection_live.is_set()
+        assert not server.connection_lock.locked()
+
+        old_read, old_write = server.read_stream, server.write_stream
+        server.reset_streams()
+        assert (
+            server.read_stream is not old_read and server.write_stream is not old_write
+        )
+
+        client2 = await websockets.connect(
+            f"ws://localhost:{server.port}",
+            origin="https://colab.google.com",
+            subprotocols=["mcp"],
+            additional_headers={"Authorization": f"Bearer {server.token}"},
+        )
+        assert server.connection_live.is_set()
+        await client2.close()
+        await client2.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_fixed_port_and_token_are_honoured_and_fallback_when_taken():
+    async with ColabWebSocketServer(token="fixed-token") as first:
+        assert first.token == "fixed-token"
+        wanted = first.port
+        # The port is busy: a second server asking for it must fall back, not crash.
+        async with ColabWebSocketServer(port=wanted) as second:
+            assert second.port != wanted
+            assert second.port > 0
+    async with ColabWebSocketServer(port=wanted, token="fixed-token") as third:
+        assert third.port == wanted
+
+
+@pytest.mark.asyncio
+async def test_on_disconnect_callback_fires_when_tab_drops():
+    fired = []
+    async with ColabWebSocketServer(on_disconnect=lambda: fired.append(True)) as server:
+        client = await websockets.connect(
+            f"ws://localhost:{server.port}",
+            origin="https://colab.google.com",
+            subprotocols=["mcp"],
+            additional_headers={"Authorization": f"Bearer {server.token}"},
+        )
+        await client.close()
+        await client.wait_closed()
+        for _ in range(50):
+            if fired:
+                break
+            await asyncio.sleep(0.02)
+    assert fired == [True]
+
+
+@pytest.mark.asyncio
+async def test_large_frames_are_accepted():
+    from colab_mcp.websocket_server import MAX_MESSAGE_BYTES
+    from mcp.types import JSONRPCMessage, JSONRPCNotification
+
+    async with ColabWebSocketServer() as server:
+        client = await websockets.connect(
+            f"ws://localhost:{server.port}",
+            origin="https://colab.google.com",
+            subprotocols=["mcp"],
+            additional_headers={"Authorization": f"Bearer {server.token}"},
+            max_size=MAX_MESSAGE_BYTES,
+        )
+        assert not server.disconnected.is_set()
+        big = JSONRPCMessage(
+            JSONRPCNotification(
+                jsonrpc="2.0", method="big", params={"blob": "x" * (3 * 1024 * 1024)}
+            )
+        )
+        reader = asyncio.create_task(server.read_stream.receive())
+        await client.send(big.model_dump_json())
+        received = await asyncio.wait_for(reader, 5)
+        assert len(received.message.root.params["blob"]) == 3 * 1024 * 1024
+        await client.close()
+        await client.wait_closed()
+        for _ in range(50):
+            if server.disconnected.is_set():
+                break
+            await asyncio.sleep(0.02)
+        assert server.disconnected.is_set()
